@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f6f43">
+<meta name="description" content="공인중개사 상담·회의 녹음을 텍스트로 변환하고 AI로 정리하는 휴대폰용 앱">
+<title>REAL Audio to Text Mobile</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <button id="btnBack" class="back" type="button" aria-label="뒤로" hidden>‹</button>
+  <h1 id="viewTitle">REAL Audio to Text</h1>
+</header>
+
+<main>
+  <!-- 잠금 -->
+  <section id="view-lock" class="view" hidden>
+    <div class="card center">
+      <p class="lead">앱 잠금 비밀번호를 입력하세요.</p>
+      <input id="lockPin" type="password" inputmode="numeric" autocomplete="off" placeholder="비밀번호">
+      <button id="btnUnlock" class="primary" type="button">열기</button>
+      <p id="lockMsg" class="msg"></p>
+    </div>
+  </section>
+
+  <!-- 홈 -->
+  <section id="view-home" class="view" hidden>
+    <div class="menu">
+      <button class="menu-btn" data-go="record" type="button"><span class="ico">🎙️</span><span>녹음하기</span></button>
+      <button class="menu-btn" data-go="import" type="button"><span class="ico">📁</span><span>파일 불러오기</span></button>
+      <button class="menu-btn" data-go="history" type="button"><span class="ico">📝</span><span>작업 기록</span></button>
+      <button class="menu-btn" data-go="settings" type="button"><span class="ico">⚙️</span><span>설정</span></button>
+    </div>
+    <div id="homeNotice" class="card notice" hidden></div>
+  </section>
+
+  <!-- 녹음 -->
+  <section id="view-record" class="view" hidden>
+    <div class="card center">
+      <div id="recTime" class="rec-time">00:00:00</div>
+      <div class="rec-sub">최대 3시간 · <span id="recSegInfo">대기 중</span></div>
+      <button id="btnRec" class="rec-btn" type="button" aria-label="녹음 시작">●</button>
+      <div class="row">
+        <button id="btnPause" type="button" disabled>일시정지</button>
+        <button id="btnStop" class="danger" type="button" disabled>녹음 종료</button>
+      </div>
+      <p id="recMsg" class="msg"></p>
+    </div>
+    <div class="card small">
+      <b>녹음 전 확인</b>
+      <ul>
+        <li>녹음 중에는 이 화면을 켜 둔 채로 두십시오. 다른 앱으로 전환하거나 전화를 받으면 녹음이 멈출 수 있습니다.</li>
+        <li>녹음은 5분 단위로 휴대폰에 자동 저장되어, 중간에 멈춰도 저장된 부분은 보관됩니다.</li>
+        <li>고객 상담을 녹음할 때는 녹음과 AI 정리 사실을 미리 알리십시오.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 파일 불러오기 -->
+  <section id="view-import" class="view" hidden>
+    <div class="card">
+      <p class="lead">휴대폰에 있는 녹음 파일을 선택하세요.</p>
+      <input id="fileInput" type="file" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.webm,.ogg,.aac,.flac,.3gp,.amr">
+      <button id="btnImport" class="primary" type="button" disabled>불러오기</button>
+      <div class="progress" hidden id="impProgWrap"><div id="impProg"></div></div>
+      <p id="impMsg" class="msg"></p>
+    </div>
+    <div class="card small">
+      <ul>
+        <li>파일을 5분 단위로 나눠 저장한 뒤 변환합니다.</li>
+        <li>파일이 아주 크면(약 2시간 이상) 휴대폰 메모리 부족으로 실패할 수 있습니다. 이 경우 녹음 앱에서 나눠 저장한 뒤 불러오십시오.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 작업 기록 -->
+  <section id="view-history" class="view" hidden>
+    <div id="historyList" class="list"></div>
+    <p id="historyEmpty" class="msg center" hidden>아직 작업 기록이 없습니다.</p>
+  </section>
+
+  <!-- 상세 -->
+  <section id="view-detail" class="view" hidden>
+    <div class="card">
+      <div class="detail-head">
+        <div>
+          <div id="dTitle" class="d-title"></div>
+          <div id="dMeta" class="d-meta"></div>
+        </div>
+        <button id="btnRename" class="mini" type="button">이름 변경</button>
+      </div>
+      <div class="row">
+        <button id="btnTranscribe" class="primary" type="button">텍스트 변환</button>
+      </div>
+      <div class="row">
+        <select id="sumType" aria-label="정리 양식">
+          <option value="consult">상담 정리</option>
+          <option value="meeting">회의록</option>
+        </select>
+        <button id="btnSummarize" class="primary" type="button">AI 정리</button>
+      </div>
+      <div class="progress" hidden id="dProgWrap"><div id="dProg"></div></div>
+      <p id="dMsg" class="msg"></p>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="raw" type="button">원본 텍스트</button>
+      <button class="tab" data-tab="sum" type="button">AI 정리</button>
+    </div>
+    <div class="card">
+      <pre id="dText" class="text-box"></pre>
+      <div class="row">
+        <button id="btnSaveTxt" type="button">txt 저장</button>
+        <button id="btnShareTxt" type="button">공유</button>
+        <button id="btnCopy" type="button">복사</button>
+      </div>
+    </div>
+    <div class="card">
+      <button id="btnDelete" class="danger wide" type="button">이 작업 삭제</button>
+    </div>
+  </section>
+
+  <!-- 설정 -->
+  <section id="view-settings" class="view" hidden>
+    <div class="card">
+      <h2>텍스트 변환(음성 인식)</h2>
+      <label>사용할 AI
+        <select id="sttProvider">
+          <option value="openai">OpenAI (ChatGPT)</option>
+          <option value="gemini">Google Gemini</option>
+        </select>
+      </label>
+      <label>모델 ID
+        <input id="sttModel" list="sttModelList" autocomplete="off">
+        <datalist id="sttModelList"></datalist>
+      </label>
+      <button id="btnSttModels" class="mini" type="button">모델 목록 불러오기</button>
+      <p class="hint">Claude는 음성 인식을 지원하지 않아 변환에는 쓸 수 없습니다.</p>
+    </div>
+    <div class="card">
+      <h2>AI 정리</h2>
+      <label>사용할 AI
+        <select id="sumProvider">
+          <option value="openai">OpenAI (ChatGPT)</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="claude">Anthropic Claude</option>
+        </select>
+      </label>
+      <label>모델 ID
+        <input id="sumModel" list="sumModelList" autocomplete="off">
+        <datalist id="sumModelList"></datalist>
+      </label>
+      <button id="btnSumModels" class="mini" type="button">모델 목록 불러오기</button>
+    </div>
+    <div class="card">
+      <h2>API 키</h2>
+      <label>OpenAI API 키
+        <input id="keyOpenai" type="password" autocomplete="off" placeholder="sk-...">
+      </label>
+      <label>Gemini API 키
+        <input id="keyGemini" type="password" autocomplete="off" placeholder="AIza...">
+      </label>
+      <label>Claude API 키
+        <input id="keyClaude" type="password" autocomplete="off" placeholder="sk-ant-...">
+      </label>
+      <label class="check"><input id="saveKeys" type="checkbox"> 이 휴대폰에 키 저장(해제 시 앱을 닫으면 지워짐)</label>
+      <button id="btnSaveSettings" class="primary wide" type="button">설정 저장</button>
+      <p id="setMsg" class="msg"></p>
+      <p class="hint">키는 이 휴대폰 브라우저에만 저장되며, 변환·정리할 때 해당 AI 회사로만 전송됩니다.</p>
+    </div>
+    <div class="card">
+      <h2>앱 잠금</h2>
+      <label>새 비밀번호(숫자 4자리 이상, 비우면 잠금 해제)
+        <input id="newPin" type="password" inputmode="numeric" autocomplete="off">
+      </label>
+      <button id="btnSetPin" type="button">잠금 비밀번호 저장</button>
+      <p id="pinMsg" class="msg"></p>
+    </div>
+    <div class="card">
+      <h2>저장 공간</h2>
+      <p id="storageInfo" class="hint">확인 중…</p>
+      <button id="btnDeleteAll" class="danger wide" type="button">모든 작업 기록 삭제</button>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">REAL Audio to Text Mobile <span id="appVer"></span></footer>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
