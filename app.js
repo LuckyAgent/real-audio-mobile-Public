@@ -4,7 +4,8 @@
  */
 'use strict';
 
-const APP_VERSION = 'v0.1.0';
+const APP_VERSION = 'v0.2.0';
+const SETTINGS_VER = 2;
 const MAX_SEC = 3 * 60 * 60;            // 최대 녹음 3시간
 let SEG_SEC = 5 * 60;                   // 구간 길이 5분
 const PARTIAL_SAVE_MS = 30 * 1000;      // 진행 중 구간 30초마다 임시 저장
@@ -23,14 +24,62 @@ const LS_PIN = 'ratm_pin';
 
 const DEFAULT_SETTINGS = {
   sttProvider: 'openai',
-  sttModel: { openai: 'gpt-4o-mini-transcribe', gemini: 'gemini-2.5-flash' },
+  sttModel: { openai: 'gpt-transcribe', gemini: 'gemini-2.5-flash' },
   sumProvider: 'openai',
   sumModel: { openai: 'gpt-5-mini', gemini: 'gemini-2.5-flash', claude: 'claude-sonnet-5-5' },
   saveKeys: true,
+  vocab: '',
+  settingsVer: SETTINGS_VER,
 };
+// v0.1 기본값이던 모델(2027-02-26 종료 예정)을 쓰던 경우 OpenAI 권장 후속 모델로 한 번만 자동 변경
+const OLD_DEFAULT_STT = ['gpt-4o-mini-transcribe'];
+let settingsMigrated = false;
 
 const STT_HINT = '부동산 중개 상담 또는 회의 녹음입니다. 매매, 전세, 월세, 보증금, 계약금, 잔금, 중개보수, 등기부등본, 건축물대장, 융자, 근저당 같은 용어가 나올 수 있습니다.';
 const GEMINI_STT_PROMPT = '다음 음성을 한국어로 빠짐없이 그대로 받아 적으세요. 요약하거나 내용을 바꾸지 말고, 말하는 사람이 바뀌면 줄을 바꾸세요. 알아들을 수 없는 부분은 [불명확]으로 표시하세요. 설명 없이 받아 적은 문장만 출력하세요. ' + STT_HINT;
+const CONTEXT_CHARS = 200;              // 앞 구간 끝부분을 다음 구간 문맥으로 전달하는 길이
+const SILENCE_RMS = 0.004;              // 이보다 작으면 무음 구간으로 판단(약 -48dBFS)
+
+/* ---------------- 변환 정확도 보조 ---------------- */
+function vocabList() {
+  return String(settings.vocab || '').split(/[,\n、·]/).map((s) => s.trim()).filter(Boolean).slice(0, 100);
+}
+function tailText(t, n) {
+  if (!t) return '';
+  const s = String(t).replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(s.length - n) : s;
+}
+function sttPromptText(prevText) {
+  let p = STT_HINT;
+  const v = vocabList();
+  if (v.length) p += ' 등장할 수 있는 이름·지명·단지명: ' + v.join(', ').slice(0, 300) + '.';
+  if (prevText) p += ' 앞부분 내용: ' + tailText(prevText, CONTEXT_CHARS);
+  return p;
+}
+// 같은 문장이 비정상적으로 반복되는 인식 오류(무음·잡음 구간에서 생기는 현상) 감지
+function looksBroken(t) {
+  if (!t) return false;
+  if (/(.{2,30}?)\1{7,}/.test(t.replace(/\s+/g, ''))) return true;
+  const parts = t.split(/[\n.?!。]+/).map((s) => s.trim()).filter((s) => s.length >= 4);
+  if (parts.length >= 8) {
+    const cnt = {}; let max = 0;
+    for (const p of parts) { cnt[p] = (cnt[p] || 0) + 1; if (cnt[p] > max) max = cnt[p]; }
+    if (max / parts.length > 0.4) return true;
+  }
+  return false;
+}
+function isSilent(mono) {
+  const win = 8000; // 16kHz 기준 0.5초
+  let maxRms = 0;
+  for (let i = 0; i < mono.length; i += win) {
+    let sum = 0; const end = Math.min(mono.length, i + win);
+    for (let j = i; j < end; j++) sum += mono[j] * mono[j];
+    const rms = Math.sqrt(sum / Math.max(1, end - i));
+    if (rms > maxRms) maxRms = rms;
+    if (maxRms >= SILENCE_RMS) return false;
+  }
+  return true;
+}
 
 const SUM_SYSTEM = '당신은 공인중개사의 업무 보조자입니다. 입력은 녹음을 받아 적은 전사문이며 인식 오류가 있을 수 있습니다. 문맥으로 판단하되 전사문에 없는 내용은 만들지 마십시오. 확인되지 않은 내용은 "확인 필요"로 표시하십시오. 날짜는 YYYY-MM-DD, 금액은 억원·만원 단위로 표기하십시오. 마크다운 기호(#, *, |, ```)를 쓰지 말고 일반 텍스트로만 작성하십시오.';
 const SUM_TEMPLATES = {
@@ -128,11 +177,17 @@ function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_SETTINGS) || 'null');
     if (!s) return structuredClone(DEFAULT_SETTINGS);
-    return {
+    const out = {
       ...structuredClone(DEFAULT_SETTINGS), ...s,
       sttModel: { ...DEFAULT_SETTINGS.sttModel, ...(s.sttModel || {}) },
       sumModel: { ...DEFAULT_SETTINGS.sumModel, ...(s.sumModel || {}) },
     };
+    if (!s.settingsVer || s.settingsVer < SETTINGS_VER) {
+      if (OLD_DEFAULT_STT.includes(out.sttModel.openai)) { out.sttModel.openai = DEFAULT_SETTINGS.sttModel.openai; settingsMigrated = true; }
+      out.settingsVer = SETTINGS_VER;
+      localStorage.setItem(LS_SETTINGS, JSON.stringify(out));
+    }
+    return out;
   } catch (e) { return structuredClone(DEFAULT_SETTINGS); }
 }
 function getKeys() {
@@ -160,6 +215,12 @@ function show(view, push = true) {
     if (!push) history.pushState({ view: 'record' }, '');
     return;
   }
+  if (Job.running && view !== 'detail') {
+    toast('변환·정리 중에는 다른 화면으로 이동할 수 없습니다. 끝날 때까지 기다려 주십시오.');
+    if (!push) history.pushState({ view: 'detail' }, '');
+    return;
+  }
+  if (view !== 'history') selMode = false;
   document.querySelectorAll('.view').forEach((v) => { v.hidden = true; });
   $('view-' + view).hidden = false;
   $('viewTitle').textContent = TITLES[view] || 'REAL Audio to Text';
@@ -276,7 +337,7 @@ function startSegment() {
   Rec.segActiveMs = 0;
   Rec.segMark = performance.now();
   Rec.lastPartial = performance.now();
-  const opts = { audioBitsPerSecond: 32000 };
+  const opts = { audioBitsPerSecond: 64000 }; // 음성 인식 정확도를 위해 32kbps → 64kbps(5분 약 2.4MB)
   if (Rec.mime) opts.mimeType = Rec.mime;
   const r = new MediaRecorder(Rec.stream, opts);
   const idx = Rec.segIndex;
@@ -557,31 +618,54 @@ function blobToBase64(blob) {
   });
 }
 
-async function sttOpenAI(seg, key, model) {
-  const fd = new FormData();
-  fd.append('file', seg.blob, 'segment' + extOf(seg.mime));
-  fd.append('model', model);
-  fd.append('language', 'ko');
-  fd.append('response_format', 'json');
-  fd.append('prompt', STT_HINT);
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: fd,
+// gpt-transcribe 전용 매개변수(keywords·languages)를 서버가 거부하면 이 세션 동안은 빼고 보낸다
+let openaiCompatMode = false;
+async function sttOpenAI(seg, key, model, prevText) {
+  const isGT = /^gpt-transcribe/.test(model);
+  const build = (compat) => {
+    const fd = new FormData();
+    fd.append('file', seg.blob, 'segment' + extOf(seg.mime));
+    fd.append('model', model);
+    fd.append('prompt', sttPromptText(prevText));
+    if (isGT) {
+      if (!compat) {
+        fd.append('languages[]', 'ko');
+        vocabList().forEach((w) => fd.append('keywords[]', w));
+      }
+    } else {
+      fd.append('language', 'ko');
+      fd.append('response_format', 'json');
+      fd.append('temperature', '0');
+    }
+    return fd;
+  };
+  const send = (compat) => fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: build(compat),
   });
+  let res = await send(openaiCompatMode);
+  if (!res.ok && res.status === 400 && isGT && !openaiCompatMode) {
+    openaiCompatMode = true;
+    res = await send(true);
+  }
   if (!res.ok) throw await parseError(res, 'openai');
   const j = await res.json();
   return (j.text || '').trim();
 }
-async function sttGemini(seg, key, model) {
+async function sttGemini(seg, key, model, prevText, wavBlob) {
   // Gemini는 WAV(16kHz·모노)로 변환해 인라인 전송(5분 ≈ 9.6MB, 20MB 한도 이내)
-  let wav = seg.blob;
-  if (seg.mime !== 'audio/wav') {
+  let wav = wavBlob || seg.blob;
+  if (!wavBlob && seg.mime !== 'audio/wav') {
     const { data, sampleRate } = await decodeToMono16k(seg.blob);
     wav = encodeWav(data, sampleRate);
   }
   const b64 = await blobToBase64(wav);
+  let prompt = GEMINI_STT_PROMPT;
+  const v = vocabList();
+  if (v.length) prompt += '\n등장할 수 있는 이름·지명·단지명(들리는 경우에만 이 표기로 적으세요): ' + v.join(', ');
+  if (prevText) prompt += '\n참고: 바로 앞 구간의 마지막 내용입니다. 이 부분은 다시 적지 말고 이 음성에 담긴 내용만 받아 적으세요: "' + tailText(prevText, CONTEXT_CHARS) + '"';
   const body = {
-    contents: [{ parts: [{ text: GEMINI_STT_PROMPT }, { inline_data: { mime_type: 'audio/wav', data: b64 } }] }],
-    generationConfig: { temperature: 0 },
+    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'audio/wav', data: b64 } }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 8192 },
   };
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body),
@@ -674,7 +758,7 @@ function joinTranscript(segs) {
   return segs.map((s) => {
     const head = `[${fmtDur(t)} ~ ${fmtDur(t + (s.durationSec || 0))}]`;
     t += s.durationSec || 0;
-    return head + '\n' + (s.transcript || '(인식된 내용 없음)');
+    return head + (s.warn ? ' [인식 확인 필요]' : '') + '\n' + (s.transcript || '(인식된 내용 없음)');
   }).join('\n\n');
 }
 
@@ -692,12 +776,32 @@ async function runTranscribe(id) {
   await requestWakeLock();
   try {
     let done = segs.filter((s) => s.transcript != null).length;
-    for (const s of segs) {
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
       if (s.transcript != null) continue;
       setMsg(msg, `텍스트 변환 중… 구간 ${done + 1}/${segs.length}\n변환이 끝날 때까지 이 화면을 켜 두십시오.`);
       setProgress('dProgWrap', 'dProg', done / segs.length);
-      const text = await withRetry(() => (provider === 'openai' ? sttOpenAI(s, key, model) : sttGemini(s, key, model)));
-      s.transcript = text;
+      // 앞 구간의 끝부분을 문맥으로 전달(구간 경계에서 끊기는 문장의 인식 개선)
+      let prevText = '';
+      for (let k = i - 1; k >= 0; k--) { if (segs[k].transcript && !segs[k].silent) { prevText = segs[k].transcript; break; } }
+      // 디코딩: 무음 판정 + Gemini용 WAV 준비(실패해도 원본 그대로 전송)
+      let mono = null;
+      try { mono = await decodeToMono16k(s.blob); } catch (e) { mono = null; }
+      if (mono && isSilent(mono.data)) {
+        s.transcript = '(무음 구간)'; s.silent = true; s.warn = false;
+      } else {
+        const wav = (provider === 'gemini' && mono && s.mime !== 'audio/wav') ? encodeWav(mono.data, mono.sampleRate) : null;
+        mono = null;
+        const call = (ctx) => (provider === 'openai' ? sttOpenAI(s, key, model, ctx) : sttGemini(s, key, model, ctx, wav));
+        let text = await withRetry(() => call(prevText));
+        let warn = false;
+        if (looksBroken(text)) {
+          // 반복 인식 오류: 문맥 없이 한 번 더 시도하고, 그래도 이상하면 표시만 남김
+          const again = await withRetry(() => call(''));
+          if (!looksBroken(again)) text = again; else warn = true;
+        }
+        s.transcript = text; s.silent = false; s.warn = warn;
+      }
       await DB.put('segments', s);
       done++;
       setProgress('dProgWrap', 'dProg', done / segs.length);
@@ -763,25 +867,69 @@ const STATUS = {
   recording: ['녹음 중', 'warn'], interrupted: ['중단됨(저장분 보관)', 'warn'], recorded: ['녹음 완료', ''],
   transcribed: ['변환 완료', ''], summarized: ['정리 완료', ''],
 };
+// 작업 기록 선택 삭제
+let selMode = false;
+const selected = new Set();
+let historyIds = [];
+function updateSelBar() {
+  $('histSelBar').hidden = !selMode;
+  $('btnSelMode').hidden = selMode || historyIds.length === 0;
+  $('btnSelDel').textContent = `삭제 (${selected.size})`;
+  $('btnSelDel').disabled = selected.size === 0;
+  $('btnSelAll').textContent = (selected.size === historyIds.length && historyIds.length) ? '전체 해제' : '전체 선택';
+}
 async function renderHistory() {
   const list = (await DB.all('sessions')).sort((a, b) => b.createdAt - a.createdAt);
+  historyIds = list.map((s) => s.id);
+  for (const id of [...selected]) if (!historyIds.includes(id)) selected.delete(id);
+  if (!list.length) selMode = false;
   const box = $('historyList');
   box.innerHTML = '';
   $('historyEmpty').hidden = list.length > 0;
   for (const s of list) {
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'item';
+    b.type = 'button'; b.className = 'item' + (selMode ? ' selectable' : '') + (selected.has(s.id) ? ' checked' : '');
+    b.dataset.id = s.id;
+    if (selMode) b.setAttribute('aria-pressed', selected.has(s.id) ? 'true' : 'false');
     const st = STATUS[s.status] || ['', ''];
-    const t = document.createElement('div'); t.className = 't'; t.textContent = s.title;
+    const t = document.createElement('div'); t.className = 't';
+    if (selMode) { const ck = document.createElement('span'); ck.className = 'ck'; ck.textContent = selected.has(s.id) ? '☑' : '☐'; t.appendChild(ck); }
+    t.appendChild(document.createTextNode(s.title));
     const m = document.createElement('div'); m.className = 'm';
     m.textContent = `${fmtDate(s.createdAt)} · ${fmtDur(s.durationSec || 0)} · ${s.source === 'file' ? '파일' : '녹음'}`;
     const c = document.createElement('span'); c.className = 'chip' + (st[1] ? ' ' + st[1] : ''); c.textContent = st[0];
     m.appendChild(c);
     b.append(t, m);
-    b.addEventListener('click', () => openDetail(s.id));
+    b.addEventListener('click', () => {
+      if (!selMode) { openDetail(s.id); return; }
+      if (selected.has(s.id)) selected.delete(s.id); else selected.add(s.id);
+      renderHistory();
+    });
     box.appendChild(b);
   }
+  updateSelBar();
 }
+$('btnSelMode').addEventListener('click', () => { selMode = true; selected.clear(); renderHistory(); });
+$('btnSelCancel').addEventListener('click', () => { selMode = false; selected.clear(); renderHistory(); });
+$('btnSelAll').addEventListener('click', () => {
+  if (selected.size === historyIds.length) selected.clear(); else historyIds.forEach((id) => selected.add(id));
+  renderHistory();
+});
+$('btnSelDel').addEventListener('click', async () => {
+  const n = selected.size;
+  if (!n) return;
+  if (!confirm(`선택한 ${n}건의 녹음과 텍스트를 휴대폰에서 삭제합니다. 되돌릴 수 없습니다. 삭제하시겠습니까?`)) return;
+  $('btnSelDel').disabled = true;
+  let ok = 0;
+  for (const id of [...selected]) {
+    if (Rec.session && Rec.session.id === id) continue; // 녹음 중인 항목은 삭제하지 않음
+    try { await DB.deleteSession(id); ok++; } catch (e) { /* 다음 항목 계속 */ }
+    selected.delete(id);
+  }
+  selMode = false; selected.clear();
+  toast(ok === n ? `${ok}건을 삭제했습니다.` : `${ok}건을 삭제했습니다. ${n - ok}건은 삭제하지 못했습니다.`, 3500);
+  renderHistory();
+});
 let currentTab = 'raw';
 function selectTab(tab) {
   currentTab = tab;
@@ -792,6 +940,7 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
 
 async function openDetail(id) {
   currentSessionId = id;
+  textFileCache = null;
   currentTab = 'raw';
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'raw'));
   setMsg($('dMsg'), '');
@@ -813,6 +962,8 @@ async function renderDetail() {
   const text = currentTab === 'raw' ? s.transcript : s.summary;
   $('dText').textContent = text || (currentTab === 'raw' ? '아직 텍스트 변환을 하지 않았습니다.' : '아직 AI 정리를 하지 않았습니다.');
   const has = !!text;
+  // 공유는 버튼을 누른 직후 바로 실행해야 하므로(브라우저 보안 규칙) 파일 내용을 미리 만들어 둔다
+  textFileCache = has ? buildTextFile(s, currentTab) : null;
   $('btnSaveTxt').disabled = !has; $('btnShareTxt').disabled = !has; $('btnCopy').disabled = !has;
 }
 $('btnTranscribe').addEventListener('click', async () => {
@@ -846,9 +997,9 @@ $('btnDelete').addEventListener('click', async () => {
 });
 
 function safeName(s) { return s.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40); }
-async function currentTextFile() {
-  const s = await DB.get('sessions', currentSessionId);
-  const isRaw = currentTab === 'raw';
+let textFileCache = null;
+function buildTextFile(s, tab) {
+  const isRaw = tab === 'raw';
   const text = isRaw ? s.transcript : s.summary;
   if (!text) return null;
   const kind = isRaw ? '원본' : (SUM_TEMPLATES[s.summaryType] ? SUM_TEMPLATES[s.summaryType].label : 'AI정리');
@@ -856,6 +1007,21 @@ async function currentTextFile() {
     (isRaw ? `변환: ${s.sttModel || ''}` : `정리: ${s.summaryModel || ''}`) + '\n' + '-'.repeat(30) + '\n\n';
   const name = `REAL_${kind}_${fileStamp(s.createdAt)}_${safeName(s.title)}.txt`;
   return { name, text: header + text };
+}
+async function currentTextFile() {
+  if (textFileCache) return textFileCache;
+  const s = await DB.get('sessions', currentSessionId);
+  return s ? buildTextFile(s, currentTab) : null;
+}
+function copyFallback(text) {
+  // 클립보드 API가 막힌 경우를 위한 대체 복사
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove();
+    return ok;
+  } catch (e) { return false; }
 }
 $('btnSaveTxt').addEventListener('click', async () => {
   const f = await currentTextFile();
@@ -867,21 +1033,34 @@ $('btnSaveTxt').addEventListener('click', async () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   toast('내 파일 > 다운로드 폴더에 저장했습니다.', 3500);
 });
-$('btnShareTxt').addEventListener('click', async () => {
-  const f = await currentTextFile();
-  if (!f) return;
-  const file = new File(['﻿' + f.text], f.name, { type: 'text/plain' });
+$('btnShareTxt').addEventListener('click', () => {
+  // 주의: 이 함수 안에서 await 없이 바로 navigator.share를 호출해야 안드로이드에서 공유 창이 열린다
+  const f = textFileCache;
+  if (!f) { toast('공유할 내용이 없습니다.'); return; }
+  if (!navigator.share) {
+    const ok = copyFallback(f.text);
+    toast(ok ? '이 브라우저는 공유를 지원하지 않아 내용을 복사했습니다. 카카오톡 등에 붙여 넣으십시오.' : '이 브라우저는 공유를 지원하지 않습니다. "txt 저장"을 사용하십시오.', 4500);
+    return;
+  }
+  let data;
   try {
-    if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: f.name });
-    else if (navigator.share) await navigator.share({ title: f.name, text: f.text });
-    else toast('이 브라우저는 공유를 지원하지 않습니다. "txt 저장"을 사용하십시오.');
-  } catch (e) { /* 사용자가 취소 */ }
+    const file = new File([f.text], f.name, { type: 'text/plain' });
+    data = (navigator.canShare && navigator.canShare({ files: [file] })) ? { files: [file] } : { title: f.name, text: f.text };
+  } catch (e) { data = { title: f.name, text: f.text }; }
+  let p;
+  try { p = navigator.share(data); }
+  catch (e) { p = Promise.reject(e); }
+  p.catch((e) => {
+    if (e && e.name === 'AbortError') return; // 사용자가 공유 창을 닫음
+    const ok = copyFallback(f.text);
+    toast(`공유 창을 열지 못했습니다(${(e && e.name) || '오류'}). ` + (ok ? '내용을 복사했으니 카카오톡 등에 붙여 넣으십시오.' : '"txt 저장"을 사용하십시오.'), 5000);
+  });
 });
 $('btnCopy').addEventListener('click', async () => {
   const f = await currentTextFile();
   if (!f) return;
   try { await navigator.clipboard.writeText(f.text); toast('복사했습니다.'); }
-  catch (e) { toast('복사하지 못했습니다.'); }
+  catch (e) { toast(copyFallback(f.text) ? '복사했습니다.' : '복사하지 못했습니다.'); }
 });
 
 /* ---------------- 설정 화면 ---------------- */
@@ -893,6 +1072,7 @@ function renderSettings() {
   $('sumModel').value = settings.sumModel[settings.sumProvider] || '';
   $('keyOpenai').value = k.openai || ''; $('keyGemini').value = k.gemini || ''; $('keyClaude').value = k.claude || '';
   $('saveKeys').checked = !!settings.saveKeys;
+  $('sttVocab').value = settings.vocab || '';
   setMsg($('setMsg'), ''); setMsg($('pinMsg'), '');
   renderStorage();
 }
@@ -914,6 +1094,7 @@ function collectSettings() {
   settings.sumProvider = $('sumProvider').value;
   settings.sumModel[settings.sumProvider] = $('sumModel').value.trim();
   settings.saveKeys = $('saveKeys').checked;
+  settings.vocab = $('sttVocab').value.slice(0, 2000);
   localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
   storeKeys({ openai: $('keyOpenai').value.trim(), gemini: $('keyGemini').value.trim(), claude: $('keyClaude').value.trim() });
 }
@@ -982,5 +1163,6 @@ async function init() {
   history.replaceState({ view: 'home' }, '');
   if (localStorage.getItem(LS_PIN)) show('lock', false);
   else show('home', false);
+  if (settingsMigrated) toast('OpenAI 음성 인식 모델을 새 권장 모델(gpt-transcribe)로 바꿨습니다. 설정에서 확인할 수 있습니다.', 5000);
 }
 init();

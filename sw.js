@@ -2,7 +2,7 @@
  * 앱 화면 파일만 저장해 두고(오프라인에서도 앱 열기·녹음 가능), 온라인이면 항상 최신 파일을 먼저 받는다.
  * AI 회사 API 요청은 가로채지 않는다.
  */
-const CACHE = 'ratm-v0.1.0';
+const CACHE = 'ratm-v0.2.0';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',

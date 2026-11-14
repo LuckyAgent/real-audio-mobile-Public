@@ -80,6 +80,14 @@
 
   <!-- 작업 기록 -->
   <section id="view-history" class="view" hidden>
+    <div class="hist-bar">
+      <button id="btnSelMode" class="mini" type="button" hidden>선택 삭제</button>
+      <div id="histSelBar" class="row" hidden>
+        <button id="btnSelAll" class="mini" type="button">전체 선택</button>
+        <button id="btnSelDel" class="mini danger" type="button" disabled>삭제 (0)</button>
+        <button id="btnSelCancel" class="mini" type="button">취소</button>
+      </div>
+    </div>
     <div id="historyList" class="list"></div>
     <p id="historyEmpty" class="msg center" hidden>아직 작업 기록이 없습니다.</p>
   </section>
@@ -140,6 +148,10 @@
       </label>
       <button id="btnSttModels" class="mini" type="button">모델 목록 불러오기</button>
       <p class="hint">Claude는 음성 인식을 지원하지 않아 변환에는 쓸 수 없습니다.</p>
+      <label class="vocab">자주 쓰는 단어(선택) — 단지명·지명·사람 이름 등을 쉼표나 줄바꿈으로 구분
+        <textarea id="sttVocab" rows="3" placeholder="예) 래미안원베일리, 반포동, 김OO 대표"></textarea>
+      </label>
+      <p class="hint">입력한 단어는 변환할 때 인식 힌트로 쓰여 고유명사 정확도가 올라갑니다. 저장하려면 아래 "설정 저장"을 누르십시오.</p>
     </div>
     <div class="card">
       <h2>AI 정리</h2>
